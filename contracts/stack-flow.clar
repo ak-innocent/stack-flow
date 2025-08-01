@@ -90,3 +90,104 @@
 (define-private (is-contract-owner)
   (is-eq tx-sender CONTRACT-OWNER)
 )
+
+;; Comprehensive eligibility verification for income distribution
+(define-private (is-eligible (user principal))
+  (match (map-get? participants user)
+    participant-info (and
+      (get verification-status participant-info)
+      (>= (- stacks-block-height (get last-claim-height participant-info))
+        DISTRIBUTION-INTERVAL
+      )
+      (>= (var-get treasury-balance) (var-get distribution-amount))
+      (not (var-get paused))
+    )
+    false
+  )
+)
+
+;; Update participant statistics after successful distribution
+(define-private (update-participant-record
+    (user principal)
+    (claimed-amount uint)
+  )
+  (match (map-get? participants user)
+    current-info (ok (map-set participants user
+      (merge current-info {
+        last-claim-height: stacks-block-height,
+        total-claimed: (+ (get total-claimed current-info) claimed-amount),
+        claims-count: (+ (get claims-count current-info) u1),
+      })
+    ))
+    ERR-NOT-REGISTERED
+  )
+)
+
+;; Governance proposal type validation
+(define-private (is-valid-proposal-type (proposal-type (string-ascii 32)))
+  (or
+    (is-eq proposal-type "distribution-amount")
+    (is-eq proposal-type "distribution-interval")
+    (is-eq proposal-type "minimum-balance")
+  )
+)
+
+;; Proposal value bounds checking
+(define-private (is-valid-proposed-value (value uint))
+  (and
+    (> value u0)
+    (<= value MAX-PROPOSED-VALUE)
+  )
+)
+
+;; CORE PUBLIC FUNCTIONS
+
+;; Community registration for StackFlow participation
+(define-public (register)
+  (let ((existing-record (map-get? participants tx-sender)))
+    (asserts! (is-none existing-record) ERR-ALREADY-REGISTERED)
+    (asserts! (not (var-get paused)) ERR-CONTRACT-PAUSED)
+    (map-set participants tx-sender {
+      registered: true,
+      last-claim-height: u0,
+      total-claimed: u0,
+      verification-status: false,
+      join-height: stacks-block-height,
+      claims-count: u0,
+    })
+    (var-set total-participants (+ (var-get total-participants) u1))
+    (ok true)
+  )
+)
+
+;; Administrative verification of community members
+(define-public (verify-participant (user principal))
+  (begin
+    (asserts! (is-contract-owner) ERR-OWNER-ONLY)
+    (asserts! (is-some (map-get? participants user)) ERR-NOT-REGISTERED)
+    (map-set participants user
+      (merge (unwrap! (map-get? participants user) ERR-NOT-REGISTERED) { verification-status: true })
+    )
+    (ok true)
+  )
+)
+
+;; Execute periodic income distribution claim
+(define-public (claim-ubi)
+  (let (
+      (user tx-sender)
+      (distribution-amt (var-get distribution-amount))
+    )
+    (asserts! (not (var-get paused)) ERR-CONTRACT-PAUSED)
+    (asserts! (is-eligible user) ERR-INELIGIBLE)
+    (asserts! (>= (var-get treasury-balance) distribution-amt)
+      ERR-INSUFFICIENT-FUNDS
+    )
+    ;; Execute STX transfer to qualified participant
+    (try! (as-contract (stx-transfer? distribution-amt tx-sender user)))
+    ;; Update treasury balance and participant records
+    (var-set treasury-balance (- (var-get treasury-balance) distribution-amt))
+    (try! (update-participant-record user distribution-amt))
+    (ok distribution-amt)
+  )
+)
