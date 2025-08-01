@@ -191,3 +191,97 @@
     (ok distribution-amt)
   )
 )
+
+;; Community treasury funding mechanism
+(define-public (contribute (amount uint))
+  (begin
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (not (var-get paused)) ERR-CONTRACT-PAUSED)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (var-set treasury-balance (+ (var-get treasury-balance) amount))
+    (ok amount)
+  )
+)
+
+;; DEMOCRATIC GOVERNANCE SYSTEM
+
+;; Submit community governance proposal
+(define-public (submit-proposal
+    (proposal-type (string-ascii 32))
+    (proposed-value uint)
+  )
+  (let ((new-proposal-id (+ (var-get proposal-counter) u1)))
+    (asserts! (is-some (map-get? participants tx-sender)) ERR-NOT-REGISTERED)
+    (asserts! (is-valid-proposal-type proposal-type) ERR-INVALID-PROPOSAL)
+    (asserts! (is-valid-proposed-value proposed-value) ERR-INVALID-VALUE)
+    (asserts! (not (var-get paused)) ERR-CONTRACT-PAUSED)
+    (map-set governance-proposals new-proposal-id {
+      proposer: tx-sender,
+      proposal-type: proposal-type,
+      proposed-value: proposed-value,
+      votes-for: u0,
+      votes-against: u0,
+      status: "active",
+      expiry-height: (+ stacks-block-height PROPOSAL-VOTING-PERIOD),
+    })
+    (var-set proposal-counter new-proposal-id)
+    (ok new-proposal-id)
+  )
+)
+
+;; Participate in democratic voting process
+(define-public (vote
+    (proposal-id uint)
+    (vote-for bool)
+  )
+  (let (
+      (proposal (unwrap! (map-get? governance-proposals proposal-id) ERR-INVALID-PROPOSAL))
+      (voter-key {
+        proposal-id: proposal-id,
+        voter: tx-sender,
+      })
+    )
+    (asserts! (is-some (map-get? participants tx-sender)) ERR-NOT-REGISTERED)
+    (asserts! (is-none (map-get? voter-records voter-key)) ERR-ALREADY-VOTED)
+    (asserts! (<= proposal-id (var-get proposal-counter)) ERR-INVALID-PROPOSAL)
+    (asserts! (< stacks-block-height (get expiry-height proposal))
+      ERR-EXPIRED-PROPOSAL
+    )
+    (asserts! (is-eq (get status proposal) "active") ERR-INVALID-PROPOSAL)
+    ;; Record vote and update proposal tallies
+    (map-set voter-records voter-key true)
+    (map-set governance-proposals proposal-id
+      (merge proposal {
+        votes-for: (if vote-for
+          (+ (get votes-for proposal) u1)
+          (get votes-for proposal)
+        ),
+        votes-against: (if vote-for
+          (get votes-against proposal)
+          (+ (get votes-against proposal) u1)
+        ),
+      })
+    )
+    (ok true)
+  )
+)
+
+;; EMERGENCY CONTROL FUNCTIONS
+
+;; Activate emergency protocol suspension
+(define-public (pause)
+  (begin
+    (asserts! (is-contract-owner) ERR-OWNER-ONLY)
+    (var-set paused true)
+    (ok true)
+  )
+)
+
+;; Resume normal protocol operations
+(define-public (unpause)
+  (begin
+    (asserts! (is-contract-owner) ERR-OWNER-ONLY)
+    (var-set paused false)
+    (ok true)
+  )
+)
